@@ -1,0 +1,5 @@
+# env files (can opt-in for committing if needed)
+.env*
+
+#가상환경
+gemini/
