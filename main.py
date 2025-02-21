@@ -64,7 +64,7 @@ def extract_images_from_html(html_content):
 
 
 # ✅ Blogger 게시글을 가져와서 Gemini에게 전달하는 엔드포인트
-@app.route("/process_blogger", methods=["POST"])
+@app.route("/process_json", methods=["POST"])
 def process_blogger():
     start_time = time.time()
 
