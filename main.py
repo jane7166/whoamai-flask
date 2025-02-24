@@ -87,20 +87,64 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
 
 예시는 다음과 같아.
 
-{
-    "id": "1.1",
-    "question": "블로그 운영자의 이름은 무엇인가?",
-    "answer": "김철수",
-    "evidence": "여러 게시글에서 '철수형'이라는 별칭이 반복적으로 등장하며, 특정 제목에서 본명이 노출됨",
-    "source_texts": [
-        "오늘 영희가 나를 실수로 철수형이라고 불렀다.",
-        "오늘 길동이 형과 약속이 있었다."
-    ],
-    "source_images": [
-        "https://example.com/image1.jpg",
-        "https://example.com/image2.jpg"
-    ]
-}
+[
+    {
+        "id": "1.1",
+        "question": "블로그 운영자의 이름은 무엇인가?",
+        "answer": "김철수",
+        "evidence": "여러 게시글에서 '철수형'이라는 별칭이 반복적으로 등장하며, 특정 제목에서 본명이 노출됨",
+        "source_texts": [
+            "오늘 영희가 나를 실수로 철수형이라고 불렀다.",
+            "오늘 길동이 형과 약속이 있었다."
+        ],
+        "source_images": [
+            "https://example.com/image1.jpg",
+            "https://example.com/image2.jpg"
+        ]
+    },
+    {
+        "id": "1.2",
+        "question": "블로그 운영자의 성별은 무엇인가?",
+        "answer": "남성",
+        "evidence": "'철수'라는 이름은 일반적으로 남성의 이름으로 사용됨. 또한 게시글에서 '형'이라는 호칭이 사용됨.",
+        "source_texts": [
+            "오늘 영희가 나를 실수로 철수형이라고 불렀다."
+        ],
+        "source_images": []
+    },
+    {
+        "id": "1.3",
+        "question": "블로그 운영자의 나이와 생년월일은 무엇인가?",
+        "answer": "20대 후반에서 30대 초반으로 추정",
+        "evidence": "게시글에서 대학 생활과 직장 생활에 대한 언급이 없고, 사회 초년생으로 보이는 문맥이 포함됨.",
+        "source_texts": [
+            "오늘 친구들과 신입사원 교육을 받았다.",
+            "요즘 회사에서 새로운 프로젝트를 시작했다."
+        ],
+        "source_images": []
+    },
+    {
+        "id": "1.4",
+        "question": "블로그 운영자의 전화번호, 카드번호, 여권번호, 자동차 번호 또는 특정 비밀번호는 무엇인가?",
+        "answer": "알 수 없음",
+        "evidence": "게시글에는 개인 식별에 사용될 수 있는 정보가 포함되어 있지 않음.",
+        "source_texts": [],
+        "source_images": []
+    },
+    {
+        "id": "1.5",
+        "question": "블로그 운영자의 거주지는 어디인가?",
+        "answer": "서울로 추정",
+        "evidence": "게시글에서 '홍대 근처에서 친구를 만났다'라는 문장이 포함되어 있어 서울에 거주할 가능성이 높음.",
+        "source_texts": [
+            "홍대 근처에서 친구를 만났다.",
+            "오늘 강남에서 회의를 했다."
+        ],
+        "source_images": [
+            "https://example.com/image3.jpg"
+        ]
+    }
+]
 평가할 개인정보는 아래 1.부터 5.까지의 조건들에 따라 평가해줘.
 
 1. 블로그 운영자의 개인 신상 정보 유출 가능성 평가
@@ -183,36 +227,52 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
 
         # ✅ Gemini API 호출
         response = model.generate_content(
-            combined_text,  # ✅ 프롬프트 + 제목 + 본문 + 이미지 포함된 입력 데이터
+            combined_text,
             generation_config=genai.types.GenerationConfig(
                 candidate_count=1,
                 temperature=1.0
             )
         )
 
-        print("Gemini API 응답:", response.text)
+        raw_response_text = response.text.strip()
+        print("📢 Gemini API 원본 응답:", raw_response_text)  
 
-        # ✅ 응답을 JSON으로 파싱
+        # ✅ 🚨 JSON 응답이 Markdown 코드 블록(````json ... `````)으로 감싸진 경우 제거
+        if raw_response_text.startswith("```json"):
+            raw_response_text = raw_response_text[7:-3]  # "```json"과 "```" 제거
+
+        # ✅ 개행(`\n`) 및 공백(` `) 제거
+        raw_response_text = raw_response_text.replace("\n", "").replace("\r", "").strip()
+
+        # ✅ JSON 배열이 아닐 경우 강제로 리스트(`[]`)로 변환
+        if raw_response_text.startswith("{") and raw_response_text.endswith("}"):
+            raw_response_text = f"[{raw_response_text}]"
+        elif not raw_response_text.startswith("["):
+            raw_response_text = f"[{raw_response_text}]"
+        
+        # ✅ 쉼표(`,`)로 구분된 JSON에서 불필요한 쉼표 제거 후 JSON 배열 변환
+        raw_response_text = re.sub(r",\s*}", "}", raw_response_text)  # ✅ 마지막 쉼표 제거
+
+        # ✅ JSON 변환 시도
         try:
-            gen_response = json.loads(response.text) if response.text.strip() else None
-        except Exception as parse_error:
-            print("JSON 파싱 실패:", parse_error)
-            gen_response = response.text
+            gen_response = json.loads(raw_response_text)
+        except json.JSONDecodeError as e:
+            print("❌ JSON 파싱 오류:", e)
+            gen_response = {"error": "Invalid JSON format", "raw_response": raw_response_text}
 
         execution_time = time.time() - start_time
 
         return jsonify({
-            "response": gen_response if gen_response else "No response",
+            "response": gen_response,
             "execution_time": f"{execution_time:.2f} 초",
-            "all_titles": all_titles,  # ✅ 제목 리스트 포함
+            "all_titles": all_titles,
             "all_texts": all_texts,
             "all_images_base64": all_images_base64
         })
 
     except Exception as e:
-        print("Error in process_blogger:", str(e))
+        print("❌ Flask 처리 중 오류 발생:", str(e))
         return jsonify({"error": "Failed to process Blogger data", "details": str(e)}), 500
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
