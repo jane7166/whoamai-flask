@@ -2,25 +2,28 @@ import os
 import time
 import json
 import re
-import requests  # 이미지 다운로드를 위해 필요
-import base64  # Base64 변환을 위해 필요
-from bs4 import BeautifulSoup  # HTML에서 텍스트 추출
+import requests
+import base64
+from PIL import Image
+from io import BytesIO
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import google.generativeai as genai
+from bs4 import BeautifulSoup
 
+# .env 파일에서 API 키 불러오기
 load_dotenv()
 api_key = os.getenv("MY_KEY")
 
 app = Flask(__name__)
-CORS(app)  # CORS 허용
+CORS(app)
 
 if not api_key:
     raise ValueError("API Key가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.0-flash-exp")  # 원하는 모델을 지정합니다.
 
 def extract_text_from_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
@@ -29,15 +32,39 @@ def extract_text_from_html(html_content):
 def extract_images_from_html(html_content):
     return re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_content)
 
-def url_to_base64(image_url):
+def download_image(image_url, save_folder='downloaded_images'):
     try:
+        if not image_url.startswith('http'):
+            image_url = 'https://' + image_url
+
         response = requests.get(image_url, timeout=5)
         if response.status_code == 200:
-            return base64.b64encode(response.content).decode("utf-8")
+            if not os.path.exists(save_folder):
+                os.makedirs(save_folder)
+
+            image_name = os.path.basename(image_url)
+            image_name = os.path.splitext(image_name)[0] + '.jpg'
+            image_path = os.path.join(save_folder, image_name)
+
+            image = Image.open(BytesIO(response.content))
+            image = image.convert('RGB')
+            image.save(image_path, 'JPEG')
+
+            print(f"✔️ 이미지 다운로드 완료: {image_path}")
+            return image_url  # 이미지 경로 대신 URL을 반환
         else:
+            print(f"⚠️ 이미지 다운로드 실패 ({image_url})")
             return None
     except Exception as e:
-        print(f"⚠️ 이미지 변환 실패 ({image_url}): {str(e)}")
+        print(f"⚠️ 이미지 다운로드 중 오류 발생 ({image_url}): {str(e)}")
+        return None
+
+def url_to_base64(image_path):
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
+    except Exception as e:
+        print(f"⚠️ 이미지 변환 실패 ({image_path}): {str(e)}")
         return None
 
 @app.route("/process_json", methods=["POST"])
@@ -52,24 +79,27 @@ def process_blogger():
         if not items:
             return jsonify({"error": "No posts found in 'items'"}), 400
 
-        all_titles = []  # ✅ 블로그 게시글 제목 저장
-        all_texts = []   # ✅ 블로그 게시글 내용 저장
-        all_images_base64 = []  # ✅ 블로그 게시글 이미지 저장
+        all_titles = []
+        all_texts = []
+        all_images_base64 = []
+        all_image_urls = []  # 이미지 URL을 저장할 리스트
 
-        # ✅ 블로그 글 제목, 내용 및 이미지 변환
         for post in items:
-            title = post.get("title", "제목 없음")  # 제목 가져오기
+            title = post.get("title", "제목 없음")
             content_html = post.get("content", "")
-            extracted_text = extract_text_from_html(content_html)  # HTML 태그 제거된 텍스트
+            extracted_text = extract_text_from_html(content_html)
             
-            images = extract_images_from_html(content_html)  # HTML에서 이미지 URL 추출
-            base64_images = [url_to_base64(img_url) for img_url in images if url_to_base64(img_url)]
+            images = extract_images_from_html(content_html)
+            image_paths = [download_image(img_url) for img_url in images]
+            base64_images = [url_to_base64(img_path) for img_path in image_paths if img_path]
 
-            all_titles.append(title)  # ✅ 제목 저장
-            all_texts.append(extracted_text)  # ✅ 본문 저장
-            all_images_base64.extend(base64_images)  # ✅ Base64 변환된 이미지 저장
+            all_titles.append(title)
+            all_texts.append(extracted_text)
+            all_images_base64.extend(base64_images)
+            all_image_urls.extend([img_url for img_url in image_paths if img_url])  # URL 추가
 
         print("📢 Blogger 게시글 제목, 텍스트 및 이미지 변환 완료")
+
 
         # ✅ 프롬프트 (명령어 부분)
         prompt = """
@@ -81,9 +111,10 @@ def process_blogger():
 예를 들어 나이를 언급하고 있지 않아도 최근 고등학교 졸업과 관련된 내용이 게시글에 포함되어있다면 20대 초반으로 예측해줘.
 - 특히 주변의 정보들과 혼동되지 않고 블로그 운영자 본인의 개인정보만 예측해야 해. 
 예를 들어 특정 음식점의 전화번호, 지인의 이름과 같은 정보는 블로그 운영자의 정보가 아니야.
+- 반드시 이미지도 함께 분석해줘.
 
 답변은 JSON 형식으로 해줘.
-id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, answer에는 질문에 대한 답변을, evidence에는 제미나이가 생각하는 답변에 대한 근거를, source_texts에는 어떤 블로그의 제목이나 블로그 게시글의 문장을 보고 그렇게 판단했는 지를, source_images에는 어떤 이미지를 보고 그렇게 판단했는지에 대해 JSON 형식으로 반환해주면 돼.
+id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, answer에는 질문에 대한 답변을, evidence에는 제미나이가 생각하는 답변에 대한 근거를, source_texts에는 어떤 블로그의 제목이나 블로그 게시글의 문장을 보고 그렇게 판단했는 지를, source_images에는 어떤 이미지를 보고 그렇게 판단했는지 이미지 URL을 JSON 형식으로 반환해주면 돼.
 
 예시는 다음과 같아.
 
@@ -210,17 +241,25 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
         """
 
         # ✅ 프롬프트 + 블로그 제목 + 본문 + 이미지 정보를 하나의 텍스트로 합침
+        all_titles = "\n".join(all_titles)
+        all_texts = "\n\n".join(all_texts)
+        all_images_base64 = "\n".join([f"이미지 {i+1}: {img}" for i, img in enumerate(all_images_base64)])
+        all_image_urls = "\n".join([f"이미지 {i+1}: {img_url}" for i, img_url in enumerate(all_image_urls)])  # URL 추가
+        
         combined_text = f"""
         {prompt}  
         
         🔹 [블로그 제목]
-        { "\n".join(all_titles) }
+        {all_titles}
         
         🔹 [블로그 게시글 내용]
-        { "\n\n".join(all_texts) }
+        {all_texts}
         
-        🔹 [이미지 정보]
-        {"\n".join([f"이미지 {i+1}: {img}" for i, img in enumerate(all_images_base64)])}
+        🔹 [이미지 정보 (Base64)]
+        {all_images_base64}
+
+        🔹 [이미지 정보 (URL)]
+        {all_image_urls}
         """
 
         print("📢 Gemini로 보낼 최종 입력 텍스트:", combined_text)
@@ -235,7 +274,7 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
         )
 
         raw_response_text = response.text.strip()
-        print("📢 Gemini API 원본 응답:", raw_response_text)  
+        print("📢 Gemini API 원본 응답:", raw_response_text)
 
         # ✅ 🚨 JSON 응답이 Markdown 코드 블록(````json ... `````)으로 감싸진 경우 제거
         if raw_response_text.startswith("```json"):
@@ -267,7 +306,8 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
             "execution_time": f"{execution_time:.2f} 초",
             "all_titles": all_titles,
             "all_texts": all_texts,
-            "all_images_base64": all_images_base64
+            "all_images_base64": all_images_base64,
+            "all_image_urls": all_image_urls  # URL 포함
         })
 
     except Exception as e:
@@ -275,4 +315,4 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
         return jsonify({"error": "Failed to process Blogger data", "details": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(debug=True)
