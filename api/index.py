@@ -3,15 +3,15 @@ import time
 import json
 import re
 import base64
-import requests
+import requests 
 from PIL import Image
 from io import BytesIO
-from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
-from dotenv import load_dotenv
+from flask import Flask, request, jsonify 
+from flask_sqlalchemy import SQLAlchemy 
+from flask_cors import CORS 
+from dotenv import load_dotenv 
 import google.generativeai as genai
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup 
 
 # .env 파일에서 API 키 불러오기
 load_dotenv()
