@@ -2,11 +2,12 @@ import os
 import time
 import json
 import re
-import requests
 import base64
+import requests
 from PIL import Image
 from io import BytesIO
 from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -19,90 +20,46 @@ api_key = os.getenv("MY_KEY")
 app = Flask(__name__)
 CORS(app)
 
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///images.db'
+db = SQLAlchemy(app)
+
+# 데이터베이스 모델
+class Image(db.Model):
+    __tablename__ = 'images'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    image_path = db.Column(db.Text, nullable=False) 
+
+# GEMINI API 부분
 if not api_key:
     raise ValueError("API Key가 설정되지 않았습니다. .env 파일을 확인하세요.")
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-2.0-flash-exp")  # 원하는 모델을 지정합니다.
+model = genai.GenerativeModel("gemini-2.0-flash-exp")  # flash 2.0. 모델 사용
 
+# html text로 변환
 def extract_text_from_html(html_content):
     soup = BeautifulSoup(html_content, "html.parser")
     return soup.get_text(separator=" ", strip=True)
 
+# html image로 변환
 def extract_images_from_html(html_content):
     return re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html_content)
 
-def download_image(image_url, save_folder='downloaded_images'):
+# 이미지 URL을 Base64로 변환하는 함수
+def url_to_base64(image_url):
     try:
-        if not image_url.startswith('http'):
-            image_url = 'https://' + image_url
-
         response = requests.get(image_url, timeout=5)
         if response.status_code == 200:
-            if not os.path.exists(save_folder):
-                os.makedirs(save_folder)
-
-            image_name = os.path.basename(image_url)
-            image_name = os.path.splitext(image_name)[0] + '.jpg'
-            image_path = os.path.join(save_folder, image_name)
-
-            image = Image.open(BytesIO(response.content))
-            image = image.convert('RGB')
-            image.save(image_path, 'JPEG')
-
-            print(f"✔️ 이미지 다운로드 완료: {image_path}")
-            return image_url  # 이미지 경로 대신 URL을 반환
+            return base64.b64encode(response.content).decode('utf-8')
         else:
-            print(f"⚠️ 이미지 다운로드 실패 ({image_url})")
+            print(f"⚠️ 이미지 다운로드 실패 ({response.status_code}): {image_url}")
             return None
     except Exception as e:
-        print(f"⚠️ 이미지 다운로드 중 오류 발생 ({image_url}): {str(e)}")
+        print(f"⚠️ 이미지 Base64 변환 오류: {image_url}, {str(e)}")
         return None
-
-def url_to_base64(image_path):
-    try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    except Exception as e:
-        print(f"⚠️ 이미지 변환 실패 ({image_path}): {str(e)}")
-        return None
-
-@app.route("/process_json", methods=["POST"])
-def process_blogger():
-    start_time = time.time()
-
-    try:
-        data = request.get_json()
-        print("📢 Flask에서 받은 데이터:", json.dumps(data, indent=2, ensure_ascii=False))
-
-        items = data.get("items", [])
-        if not items:
-            return jsonify({"error": "No posts found in 'items'"}), 400
-
-        all_titles = []
-        all_texts = []
-        all_images_base64 = []
-        all_image_urls = []  # 이미지 URL을 저장할 리스트
-
-        for post in items:
-            title = post.get("title", "제목 없음")
-            content_html = post.get("content", "")
-            extracted_text = extract_text_from_html(content_html)
-            
-            images = extract_images_from_html(content_html)
-            image_paths = [download_image(img_url) for img_url in images]
-            base64_images = [url_to_base64(img_path) for img_path in image_paths if img_path]
-
-            all_titles.append(title)
-            all_texts.append(extracted_text)
-            all_images_base64.extend(base64_images)
-            all_image_urls.extend([img_url for img_url in image_paths if img_url])  # URL 추가
-
-        print("📢 Blogger 게시글 제목, 텍스트 및 이미지 변환 완료")
-
-
-        # ✅ 프롬프트 (명령어 부분)
-        prompt = """
+        
+prompt = """
         개인이 운영하는 블로그의 제목과 게시글과 게시글에 포함된 이미지야. 블로그 운영자의 블로그 제목과 게시글과 이미지를 통해 개인을 추측할 수 있는지 평가하고 개인정보 유출 위험도를 최대한 분석할거야.
 
 - 특정 조건에서 개인정보 유출 가능성이 있는 경우 어떤 게시글이나 이미지를 보고 그렇게 판단했는지 그 근거와 함께 어떤 정보를 어떻게 예측할 수 있는지 설명할 수 있어야 해.
@@ -240,29 +197,93 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
 - 지인의 반려동물이 아닌 블로그 운영자의 반려동물임을 알 수 있는가?
         """
 
-        # ✅ 프롬프트 + 블로그 제목 + 본문 + 이미지 정보를 하나의 텍스트로 합침
-        all_titles = "\n".join(all_titles)
-        all_texts = "\n\n".join(all_texts)
-        all_images_base64 = "\n".join([f"이미지 {i+1}: {img}" for i, img in enumerate(all_images_base64)])
-        all_image_urls = "\n".join([f"이미지 {i+1}: {img_url}" for i, img_url in enumerate(all_image_urls)])  # URL 추가
-        
-        combined_text = f"""
-        {prompt}  
-        
-        🔹 [블로그 제목]
-        {all_titles}
-        
-        🔹 [블로그 게시글 내용]
-        {all_texts}
-        
-        🔹 [이미지 정보 (Base64)]
-        {all_images_base64}
+# 사진 db에 저장
+@app.route("/refresh_images", methods=['POST'])
+def refresh_images():
+    data = request.get_json()
+    image_urls = data.get('image_urls')
 
-        🔹 [이미지 정보 (URL)]
-        {all_image_urls}
-        """
+    if not image_urls or not isinstance(image_urls, list):
+        return jsonify({"error" : "Invalid or missing image_urls"}), 400
+    
+    db.session.query(Image).delete()
+    db.session.commit()
 
-        print("📢 Gemini로 보낼 최종 입력 텍스트:", combined_text)
+    saved_images = []
+    for url in image_urls:
+        new_image = Image(image_path = url)
+        db.session.add(new_image)
+        saved_images.append(url)
+
+    db.session.commit()
+
+    return jsonify({
+        "message" : "Database refreshed successfully",
+        "total_images" : len(saved_images),
+        "saved_image" : saved_images
+    })
+
+@app.route("/process_json", methods=["POST"])
+def process_blogger():
+    start_time = time.time()
+
+    try:
+        data = request.get_json()
+        print("📢 Flask에서 받은 데이터:", json.dumps(data, indent=2, ensure_ascii=False))
+
+        items = data.get("items", [])
+        if not items:
+            return jsonify({"error": "No posts found in 'items'"}), 400
+
+        all_titles = []
+        all_texts = []
+        all_images_base64 = []
+        all_image_urls = []  # 이미지 URL 저장 리스트
+        failed_base64_images = []  # Base64 변환 실패한 이미지 목록
+
+        # 📌 Blogger 데이터에서 제목, 본문, 이미지 URL 추출
+        for post in items:
+            title = post.get("title", "제목 없음")
+            content_html = post.get("content", "")
+            extracted_text = extract_text_from_html(content_html)
+
+            images = extract_images_from_html(content_html)
+
+            all_titles.append(title)
+            all_texts.append(extracted_text)
+            all_image_urls.extend(images)  # URL 추가
+
+        print("📢 Blogger 게시글 제목, 텍스트 및 이미지 URL 변환 완료")
+
+        # 📌 3️⃣ 기존에 저장된 이미지 DB에서 가져오기
+        saved_images = Image.query.all()
+        saved_image_urls = [img.image_path for img in saved_images]  # ✅ 필드명 수정
+
+        # 📌 Base64 변환 (DB에서 가져온 이미지 URL 기준)
+        for img_url in saved_image_urls:
+            base64_data = url_to_base64(img_url)
+            if base64_data:
+                all_images_base64.append(base64_data)
+            else:
+                failed_base64_images.append(img_url)  # Base64 변환 실패한 이미지 저장
+
+        # ✅ Base64 변환 실패한 이미지 로그 확인
+        if failed_base64_images:
+            print("⚠️ Base64 변환 실패한 이미지 목록:", failed_base64_images)
+
+        # ✅ Gemini API에 전달할 JSON 데이터
+        gemini_payload = {
+            "prompt" : prompt,
+            "titles": all_titles,
+            "texts": all_texts,
+            "source_images": all_image_urls,  # ✅ Gemini가 JSON 배열로 인식할 수 있도록 수정
+            "images_base64": all_images_base64  # ✅ Base64 데이터 포함
+        }
+
+        # ✅ JSON을 문자열로 변환하여 Gemini API에 전달
+        combined_text = json.dumps(gemini_payload, indent=2, ensure_ascii=False)
+
+        print("📢 Gemini로 보낼 최종 JSON 데이터:", combined_text)
 
         # ✅ Gemini API 호출
         response = model.generate_content(
@@ -276,7 +297,7 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
         raw_response_text = response.text.strip()
         print("📢 Gemini API 원본 응답:", raw_response_text)
 
-        # ✅ 🚨 JSON 응답이 Markdown 코드 블록(````json ... `````)으로 감싸진 경우 제거
+        # ✅ JSON 응답이 Markdown 코드 블록(````json ... `````)으로 감싸진 경우 제거
         if raw_response_text.startswith("```json"):
             raw_response_text = raw_response_text[7:-3]  # "```json"과 "```" 제거
 
@@ -306,8 +327,9 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
             "execution_time": f"{execution_time:.2f} 초",
             "all_titles": all_titles,
             "all_texts": all_texts,
-            "all_images_base64": all_images_base64,
-            "all_image_urls": all_image_urls  # URL 포함
+            "source_images": all_image_urls,  # ✅ JSON에 이미지 URL 포함
+            "images_base64": all_images_base64,  # ✅ Base64 변환된 이미지 포함
+            "failed_base64_images": failed_base64_images  # ✅ Base64 변환 실패한 이미지 목록 추가
         })
 
     except Exception as e:
@@ -315,4 +337,6 @@ id는 1.1, 1.2와 같이 질문 번호를, question에는 직접적인 질문, a
         return jsonify({"error": "Failed to process Blogger data", "details": str(e)}), 500
 
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     app.run(debug=True)
